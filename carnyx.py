@@ -5,6 +5,7 @@ from mutagen.easyid3 import EasyID3
 from requests import get
 from json import loads, dumps
 import os
+from time import sleep
 
 
 class VideoData:
@@ -16,7 +17,7 @@ class VideoData:
 
 def printUsage():
     print(f"usage: python {argv[0]} <playlistID> <playlistDir>")
-    print("                      <videoID> [optional playlist name]")
+    print(f"usage: python {argv[0]} <videoID> [optional playlist name]")
     exit(1)
 
 
@@ -32,14 +33,14 @@ def getVideoData(ytid: str) -> list[VideoData]:
         videos = []
         if is_video:
             info = ydl.extract_info(f"https://youtube.com/watch?v={ytid}", download=False)
-            videos.append(VideoData(info["id"], unidecode(info["title"]).strip(), info["channel"]))
+            videos.append(VideoData(info["id"], unidecode(info["title"]).strip().replace("/", ""), info["channel"]))
         else:
             info = ydl.extract_info(f"https://youtube.com/playlist?list={ytid}", download=False)
             videos = []
             for video in info["entries"]:
                 videos.append(VideoData(
                     video["id"],
-                    unidecode(video["title"]).strip(),
+                    unidecode(video["title"]).strip().replace("/", ""),
                     video["channel"]
                 ))
         return videos
@@ -67,8 +68,10 @@ def downloadVideo(video: VideoData, playlist_name = "", do_path = False) -> None
         print("Invalid combination of playlist_name and do_path!")
         exit(1)
 
+    print(f"[{video.id}]: {video.title}")
+
     abs_dir_path = os.path.abspath(playlist_name if do_path else ".")
-    abs_file_path = f"{abs_dir_path}/{video.title}.mp3"
+    abs_file_path = f'{abs_dir_path}/{video.title}.mp3'
 
     # download video
     ydl_opts = {
@@ -84,6 +87,7 @@ def downloadVideo(video: VideoData, playlist_name = "", do_path = False) -> None
     }
     ydl = YoutubeDL(ydl_opts)
     ydl.download([f"https://youtube.com/watch?v={video.id}"])
+    ydl.close()
 
     # set metadata
     setMetaData(
@@ -112,11 +116,12 @@ def handlePlaylist(ytid: str, playlist_name: str) -> None:
     to_create = [] # in cloud but not in local
 
     for title in cloud_titles:
-        if title not in local_titles:
+        if title not in local_titles and title != "[Deleted video]":
             to_create.append(cloud_titles[title])
     for title in local_titles:
         if title not in cloud_titles:
-            os.remove(f"{playlist_name}/{title}.mp3")
+            os.remove(f'{playlist_name}/{title}.mp3')
+            print(f'Removed {playlist_name}/{title}.mp3')
 
     for video in to_create:
         downloadVideo(video, playlist_name, True)
@@ -151,3 +156,5 @@ if __name__ == "__main__":
 
 # PLtbneUBkSuGFXfEZyUIq2n-G6zRNfzNgh
 # NqtcqA53l3I
+
+# python carnyx.py PLtbneUBkSuGEQVvv0qG0TWIADSpqWUJIN Faster

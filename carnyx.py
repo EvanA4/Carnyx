@@ -1,79 +1,109 @@
-from sys import argv
-from yt_dlp import YoutubeDL
-from unidecode import unidecode
-from mutagen.easyid3 import EasyID3
-from requests import get
-from json import loads, dumps
+import sys
+import subprocess
 import os
-from time import sleep
+from unidecode import unidecode
+from pathlib import Path
+from mutagen import File
+from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError, ExtractorError
+import json
+import re
 
 
-class VideoData:
-    def __init__(self, id: str, title: str, channel: str):
-        self.id = id
-        self.title = title
-        self.channel = channel
+class SilentLogger:
+    def debug(self, *args, **kwargs): pass
+    def info(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass  # swallow errors
 
 
-def printUsage():
-    print(f"usage: python {argv[0]} <playlistID> <playlistDir>")
-    print(f"usage: python {argv[0]} <videoID> [optional playlist name]")
-    exit(1)
+def clean_str(src: str):
+    unidecoded = unidecode(src)
+    alphanumeric = "".join(c for c in unidecoded if c.isdigit() or c.isalpha() or c == " ")
+    single_spaced = re.sub(' +', ' ', alphanumeric)
+    return single_spaced.strip()
 
 
-def getVideoData(ytid: str) -> list[VideoData]:
-    ydl_opts = {
-        "quiet": True,
-        "extract_flat": True,
-        "dump_single_json": False,
-        "no_warnings": True
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        is_video = len(argv[1]) == 11
-        videos = []
-        if is_video:
-            info = ydl.extract_info(f"https://youtube.com/watch?v={ytid}", download=False)
-            videos.append(VideoData(info["id"], unidecode(info["title"]).strip().replace("/", ""), info["channel"]))
-        else:
-            info = ydl.extract_info(f"https://youtube.com/playlist?list={ytid}", download=False)
-            videos = []
-            for video in info["entries"]:
-                videos.append(VideoData(
-                    video["id"],
-                    unidecode(video["title"]).strip().replace("/", ""),
-                    video["channel"]
-                ))
-        return videos
-
-
-def setMetaData(abs_path: str, video: VideoData, playlist_name = ""):
-    id3 = EasyID3(abs_path)
-    id3["artist"] = video.channel
-    if playlist_name != "":
-        id3["album"] = playlist_name
-    id3["title"] = video.title
-    id3.save()
-
-
-def downloadVideo(video: VideoData, playlist_name = "", do_path = False) -> None:
-    '''
-    Four options:
-    !playlist_name && !do_path => create in cwd
-    !playlist_name && do_path => ERROR
-    playlist_name && !do_path => create in cwd
-    playlist_name && do_path => create in folder
-    '''
-
-    if not playlist_name and do_path:
-        print("Invalid combination of playlist_name and do_path!")
+def handle_args() -> str:
+    if len(sys.argv) != 2:
+        print("usage: carnyx.py <playlist_url|playlist_id>", file=sys.stderr)
         exit(1)
+    playlist_url = sys.argv[1]
+    if sys.argv[1].find("youtube.com") == -1:
+        playlist_url = f"https://www.youtube.com/playlist?list={sys.argv[1]}"
+    return playlist_url
 
-    print(f"[{video.id}]: {video.title}")
 
-    abs_dir_path = os.path.abspath(playlist_name if do_path else ".")
-    abs_file_path = f'{abs_dir_path}/{video.title}.mp3'
+def get_playlist(playlist_url: str) -> tuple[str, list[dict[str]]]:
+    ydl_opts = {
+        "logger": SilentLogger(),
+        "quiet": True,
+        "no_color": True,
+        "extract_flat": True,
+        "ignore_no_formats_error": True,
+        "force_generic_extractor": False,
+        "noprogress": True,
+        "no_warnings": True,
+    }
 
-    # download video
+    with YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(playlist_url, download=False)
+            file = open("junk.json", "w")
+            file.write(json.dumps(info, indent=4))
+            file.close()
+            playlist_name = info["title"]
+            videos = []
+            for entry in info["entries"]:
+                if entry is not None and entry["title"] != "[Deleted video]":
+                    videos.append({
+                        "id": entry["id"],
+                        "title": clean_str(entry["title"]),
+                        "channel": clean_str(entry["channel"])
+                    })
+            return (playlist_name, videos)
+        except (ExtractorError, DownloadError) as e:
+            print(f"Failed to extract playlist data: {e}")
+            exit(1)
+
+
+def get_local_videos(title: str) -> list[str]:
+    if not os.path.exists(title):
+        os.mkdir(title)
+        return []
+
+    return list(map(lambda x: x[:-4], os.listdir(title)))
+
+
+def compare_videos(local_videos: list[str], playlist_videos: list[dict[str]]):
+    local_set = set(local_videos)
+    playlist_set = set(map(lambda x: x["title"], playlist_videos))
+    to_download = list(filter(lambda x: x["title"] not in local_set, playlist_videos))
+    to_delete = list(filter(lambda x: x not in playlist_set, local_videos))
+    return to_download, to_delete
+
+
+def delete_videos(to_delete: list[str], playlist_title: str):
+    for video in to_delete:
+        video_path = os.path.join(playlist_title, f"{video}.mp3")
+        if os.path.isfile(video_path):
+            print(f"\t\"{video}\"", flush=True)
+            os.remove(video_path)
+
+
+def set_metadata(video: dict[str], playlist_title: str):
+    file_path = os.path.join(playlist_title, f"{video["title"]}.mp3")
+    file = File(file_path, easy=True)
+    file["title"] = [video["title"]]
+    file["album"] = [playlist_title]
+    file["artist"] = [video["channel"]]
+    file.save()
+
+
+def download_video(video: dict[str], playlist_title:str):
+    abs_dir_path = os.path.abspath(playlist_title)
+    abs_file_path = f'{abs_dir_path}/{video["title"]}.mp3'
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': abs_file_path[:-4],
@@ -83,78 +113,62 @@ def downloadVideo(video: VideoData, playlist_name = "", do_path = False) -> None
             'preferredquality': '192',
         }],
         'quiet': True,
-        'no_warnings': True
+        'no_warnings': True,
+        "no_color": True,
+        "extract_flat": True,
+        "ignore_no_formats_error": True,
+        "force_generic_extractor": False,
+        "noprogress": True,
+        "logger": SilentLogger()
     }
-    ydl = YoutubeDL(ydl_opts)
-    ydl.download([f"https://youtube.com/watch?v={video.id}"])
-    ydl.close()
 
-    # set metadata
-    setMetaData(
-        abs_file_path,
-        video,
-        playlist_name
-    )
-
-
-def handleVideo(ytid: str, playlist_name = "") -> None:
-    video = getVideoData(ytid)[0]
-    if playlist_name == "":
-        downloadVideo(video)
-    else:
-        downloadVideo(video, playlist_name)
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://youtube.com/watch?v={video["id"]}"])
+            ydl.close()
+        set_metadata(video, playlist_title)
+    except (ExtractorError, DownloadError) as e:
+        print(f"\t\tDownload failed: {e.msg}")
+    
 
 
-def handlePlaylist(ytid: str, playlist_name: str) -> None:
-    if not os.path.exists(playlist_name):
-        os.mkdir(playlist_name)
-
-    videos = getVideoData(ytid)
-    cloud_titles = { video.title: video for video in videos }
-    local_titles = set(map(lambda x: x[:-4], os.listdir(playlist_name)))
-
-    to_create = [] # in cloud but not in local
-
-    for title in cloud_titles:
-        if title not in local_titles and title != "[Deleted video]":
-            to_create.append(cloud_titles[title])
-    for title in local_titles:
-        if title not in cloud_titles:
-            os.remove(f'{playlist_name}/{title}.mp3')
-            print(f'Removed {playlist_name}/{title}.mp3')
-
-    for video in to_create:
-        downloadVideo(video, playlist_name, True)
+def download_videos(videos: list[dict[str]], playlist_title: str):
+    for video in videos:
+        print(f"\t\"{video["title"]}\"", flush=True)
+        download_video(video, playlist_title)
 
 
 def main():
-    # handle input
-    if len(argv) < 2:
-        printUsage()
-    is_video = len(argv[1]) == 11
-    if (not is_video and len(argv) != 3)    \
-        or (is_video and len(argv) > 3)     \
-        or (not is_video and len(argv[1]) != 34):
-        printUsage()
-
-    # direct to appropriate handler
-    if is_video:
-        if len(argv) == 2:
-            handleVideo(argv[1])
-        else:
-            handleVideo(argv[1], argv[2])
+    playlist_url = handle_args()
+    print(f"Playlist URL: {playlist_url}", flush=True)
+    
+    playlist_title, playlist_videos = get_playlist(playlist_url)
+    print(f"Playlist loaded: \"{playlist_title}\" with {len(playlist_videos)} videos", flush=True)
+    
+    local_videos = get_local_videos(playlist_title)
+    if len(local_videos) != 0:
+        print(f"Local playlist loaded: {len(local_videos)} videos", flush=True)
     else:
-        if (os.path.abspath(argv[2]) == os.getcwd()):
-            print("Error: playlist directory cannot be cwd.")
-            exit(1)
-        handlePlaylist(argv[1], argv[2])
+        print("No local files for playlist detected", flush=True)
+
+    to_download, to_delete = compare_videos(local_videos, playlist_videos)
+    if len(to_download) != 0:
+        print("To download:")
+        for video in to_download:
+            print(f"\t[{video["id"]}] ({video["channel"]}): \"{video["title"]}\"")
+    if len(to_delete) != 0:
+        print("To delete:")
+        for video in to_delete:
+            print(f"\t\"{video}\"")
+
+    if len(to_delete) != 0:
+        print("Deleting videos:", flush=True)
+        delete_videos(to_delete, playlist_title)
+
+    if len(to_download) != 0:
+        print("Downloading videos:", flush=True)
+        download_videos(to_download, playlist_title)
 
 
 if __name__ == "__main__":
     main()
-
-
-# PLtbneUBkSuGFXfEZyUIq2n-G6zRNfzNgh
-# NqtcqA53l3I
-
-# python carnyx.py PLtbneUBkSuGEQVvv0qG0TWIADSpqWUJIN Faster

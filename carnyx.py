@@ -17,6 +17,12 @@ class SilentLogger:
     def error(self, *args, **kwargs): pass  # swallow errors
 
 
+# def dump_obj(src):
+#     file = open("junk.json", "w")
+#     file.write(json.dumps(src, indent=4))
+#     file.close()
+
+
 def clean_str(src: str):
     unidecoded = unidecode(src)
     alphanumeric = "".join(c for c in unidecoded if c.isdigit() or c.isalpha() or c == " ")
@@ -39,7 +45,6 @@ def get_playlist(playlist_url: str) -> tuple[str, list[dict[str]]]:
         "logger": SilentLogger(),
         "quiet": True,
         "no_color": True,
-        "extract_flat": True,
         "ignore_no_formats_error": True,
         "force_generic_extractor": False,
         "noprogress": True,
@@ -49,18 +54,21 @@ def get_playlist(playlist_url: str) -> tuple[str, list[dict[str]]]:
     with YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(playlist_url, download=False)
-            file = open("junk.json", "w")
-            file.write(json.dumps(info, indent=4))
-            file.close()
             playlist_name = info["title"]
             videos = []
             for entry in info["entries"]:
                 if entry is not None and entry["title"] != "[Deleted video]":
-                    videos.append({
-                        "id": entry["id"],
-                        "title": clean_str(entry["title"]),
-                        "channel": clean_str(entry["channel"])
-                    })
+                    try:
+                        videos.append({
+                            "id": entry["id"],
+                            "title": clean_str(entry["title"]),
+                            "channel": clean_str(entry["channel"])
+                        })
+                    except KeyError as e:
+                        if "id" in entry.keys():
+                            print(f"\tRecieved invalid video metadata: Missing {e} for {entry["id"]}", flush=True)
+                        else:
+                            print(f"\tRecieved invalid video metadata: Missing {e} for {entry["id"]}", flush=True)
             return (playlist_name, videos)
         except (ExtractorError, DownloadError) as e:
             print(f"Failed to extract playlist data: {e}")
@@ -115,7 +123,6 @@ def download_video(video: dict[str], playlist_title:str):
         'quiet': True,
         'no_warnings': True,
         "no_color": True,
-        "extract_flat": True,
         "ignore_no_formats_error": True,
         "force_generic_extractor": False,
         "noprogress": True,
@@ -136,6 +143,13 @@ def download_videos(videos: list[dict[str]], playlist_title: str):
     for video in videos:
         print(f"\t\"{video["title"]}\"", flush=True)
         download_video(video, playlist_title)
+
+
+def confirm_metadata(videos: list[dict[str]], playlist_title: str):
+    for video in videos:
+        file_path = os.path.join(playlist_title, f"{video["title"]}.mp3")
+        if os.path.isfile(file_path):
+            set_metadata(video, playlist_title)
 
 
 def main():
@@ -168,6 +182,8 @@ def main():
     if len(to_download) != 0:
         print("Downloading videos:", flush=True)
         download_videos(to_download, playlist_title)
+
+    confirm_metadata(to_download, playlist_title)
 
 
 if __name__ == "__main__":
